@@ -1,17 +1,17 @@
 # 北大在线考试自动答题
 
-用 Playwright 登录考试页、自动选题；可选 DeepSeek（有参考 PDF 时走 RAG，无参考时直接作答）。不加 `--submit` 时**不会交卷**。
+用 Playwright 登录https://exam.pku.edu.cn/examinee/exams内的考试页、自动答题；目前支持 DeepSeek api 调用答题（有参考 PDF 时采用自适应chunk选择 RAG，无参考时直接作答）。
 
 ## 快速开始
 
 ```powershell
-# 1. 安装依赖
+# 1. 安装依赖（安装chrome headless shell时速度较慢，推荐挂代理）
 pip install -r requirements.txt
 playwright install chromium
 copy .env.example .env
 ```
 
-编辑 `.env`，至少填写 `DEEPSEEK_API_KEY`（可选填 `EXAM_ID=exam54`）。账号密码可选。
+编辑 `.env`，必须填写 `DEEPSEEK_API_KEY`（可选填 `EXAM_ID=exam54`）。账号密码不需要填。
 
 ```powershell
 # 2. 查看场次 / 首次登录保存会话
@@ -75,3 +75,5 @@ exams/
 - 有参考 PDF 但未预处理时，`--auto-answer` 会提示先执行 `--build-index`。
 - `.env` 里也可设 `AUTO_SUBMIT=true`（效果同 `--submit`），默认请保持 `false`。
 - `.env`、登录态、`refs` PDF、`rag/` 缓存默认不进 git；别人 pull 后需 `copy .env.example .env` 自行填写 API Key。
+
+在 Cursor 帮助下完成，非常好用。
