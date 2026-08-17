@@ -1,0 +1,27 @@
+# 本地密钥与会话（切勿提交）
+.env
+.env.local
+*.pem
+*.key
+
+# Playwright 登录态
+storage/
+*.storage.json
+
+# 大体量 PDF / RAG 缓存（exam.json 可提交）
+exams/**/refs/
+exams/**/rag/
+/*.pdf
+
+# 运行时调试快照（运行时会再生成）
+debug/*
+!debug/.gitkeep
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
