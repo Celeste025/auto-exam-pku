@@ -283,14 +283,14 @@ def _build_index(*, exam_id: str | None, force: bool = False) -> int:
         print("[index] 该场次 refs 为空，无需预处理（答题将走 direct 模式）")
         return 0
 
-    print(f"[index] refs={list(profile.ref_paths)}")
+    print(f"[index] refs={list(profile.pdf_paths)}")
     if not force and index_is_fresh(profile):
         print(f"[index] 缓存已是最新，跳过: {profile.chunks_path}")
         print("        若需强制重建请加 --force-rebuild")
         return 0
 
     chunks = build_or_load_chunks_for_exam(profile, force_rebuild=force)
-    print(f"[index] 完成: chunks={len(chunks)}")
+    print(f"[index] 完成: pdfs={len(profile.pdf_paths)} chunks={len(chunks)}")
     print(f"  clean -> {profile.clean_text_path}")
     print(f"  chunks -> {profile.chunks_path}")
     return 0

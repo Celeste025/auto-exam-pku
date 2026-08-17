@@ -55,15 +55,20 @@ class ExamProfile:
         return self.rag_dir / "chunks.json"
 
     @property
+    def pdf_paths(self) -> tuple[Path, ...]:
+        """全部可用于 RAG 的参考 PDF（按 refs 顺序）。"""
+        return tuple(p for p in self.ref_paths if p.suffix.lower() == ".pdf")
+
+    @property
     def primary_pdf(self) -> Path | None:
-        """主参考 PDF；无参考资料时返回 None。"""
-        pdfs = [p for p in self.ref_paths if p.suffix.lower() == ".pdf"]
+        """第一本参考 PDF；无参考时返回 None（full 模式等仍可用）。"""
+        pdfs = self.pdf_paths
         return pdfs[0] if pdfs else None
 
     @property
     def has_refs(self) -> bool:
-        """是否存在可用于 RAG 的 PDF（非 PDF 文件不算）。"""
-        return self.primary_pdf is not None
+        """是否存在可用于 RAG 的 PDF。"""
+        return bool(self.pdf_paths)
 
     def ensure_rag_dir(self) -> None:
         self.rag_dir.mkdir(parents=True, exist_ok=True)

@@ -232,8 +232,7 @@ def build_or_load_chunks(
         and pdf_path.exists()
         and cache_path.stat().st_mtime >= pdf_path.stat().st_mtime
     ):
-        raw = json.loads(cache_path.read_text(encoding="utf-8"))
-        chunks = [RegulationChunk(**x) for x in raw]
+        chunks = _load_chunks_file(cache_path)
         print(
             f"[chunker] 已有预处理缓存，跳过重建: {cache_path} "
             f"(chunks={len(chunks)})"
@@ -256,17 +255,45 @@ def build_or_load_chunks(
     return chunks
 
 
+def _load_chunks_file(cache_path: Path) -> list[RegulationChunk]:
+    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        items = raw.get("chunks") or []
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        raise ValueError(f"无法解析 chunks 缓存: {cache_path}")
+    return [RegulationChunk(**x) for x in items]
+
+
 def index_is_fresh(exam) -> bool:
-    """参考 PDF 的切块缓存是否仍有效（存在且不旧于 PDF）。"""
-    pdf = getattr(exam, "primary_pdf", None)
-    if pdf is None or not exam.has_refs:
+    """参考 PDF 的切块缓存是否仍有效（存在、来源一致、且不旧于任一 PDF）。"""
+    pdfs = list(getattr(exam, "pdf_paths", None) or [])
+    if not pdfs and getattr(exam, "has_refs", False):
+        pdf = getattr(exam, "primary_pdf", None)
+        pdfs = [pdf] if pdf is not None else []
+    if not pdfs:
         return False
     cache = exam.chunks_path
-    return (
-        cache.exists()
-        and pdf.exists()
-        and cache.stat().st_mtime >= pdf.stat().st_mtime
-    )
+    if not cache.exists() or not all(p.exists() for p in pdfs):
+        return False
+    newest_pdf = max(p.stat().st_mtime for p in pdfs)
+    if cache.stat().st_mtime < newest_pdf:
+        return False
+    try:
+        raw = json.loads(cache.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    expected = [p.name for p in pdfs]
+    if isinstance(raw, dict):
+        sources = raw.get("sources")
+        if sources is not None and list(sources) != expected:
+            return False
+        return True
+    # 旧版纯 list：仅当恰好一本 PDF 时仍视为有效
+    if isinstance(raw, list):
+        return len(pdfs) == 1
+    return False
 
 
 def build_or_load_chunks_for_exam(
@@ -274,15 +301,56 @@ def build_or_load_chunks_for_exam(
     *,
     force_rebuild: bool = False,
 ) -> list[RegulationChunk]:
-    """按 ExamProfile 约定路径构建 / 加载条款索引。无参考 PDF 时返回空列表。"""
-    pdf = exam.primary_pdf
-    if pdf is None:
+    """索引 exam.refs 中的全部 PDF，合并写入 chunks.json。无参考时返回空列表。"""
+    pdfs = list(getattr(exam, "pdf_paths", None) or [])
+    if not pdfs:
+        pdf = getattr(exam, "primary_pdf", None)
+        pdfs = [pdf] if pdf is not None else []
+    if not pdfs:
         print(f"[chunker] exam={exam.id} 无参考 PDF，跳过切块")
         return []
+
     exam.ensure_rag_dir()
-    return build_or_load_chunks(
-        pdf,
-        cache_path=exam.chunks_path,
-        text_cache_path=exam.clean_text_path,
-        force_rebuild=force_rebuild,
+    cache_path = exam.chunks_path
+
+    if not force_rebuild and index_is_fresh(exam):
+        chunks = _load_chunks_file(cache_path)
+        print(
+            f"[chunker] 已有预处理缓存，跳过重建: {cache_path} "
+            f"(pdfs={len(pdfs)}, chunks={len(chunks)})"
+        )
+        return chunks
+
+    all_chunks: list[RegulationChunk] = []
+    clean_parts: list[str] = []
+    for pdf in pdfs:
+        text_cache = exam.rag_dir / f"{pdf.stem}.clean.txt"
+        text = extract_pdf_text(
+            pdf,
+            cache_path=text_cache,
+            clean=True,
+            force=force_rebuild,
+        )
+        clean_parts.append(f"===== {pdf.name} =====\n{text}")
+        pieces = split_regulation_chunks(text)
+        # 多 PDF 时用文件名区分 chunk_id，避免同名规章冲突
+        if len(pdfs) > 1:
+            for c in pieces:
+                c.chunk_id = f"{pdf.stem}::{c.chunk_id}"
+        all_chunks.extend(pieces)
+        print(f"[chunker] {pdf.name}: +{len(pieces)} chunks")
+
+    exam.clean_text_path.write_text("\n\n".join(clean_parts), encoding="utf-8")
+    payload = {
+        "sources": [p.name for p in pdfs],
+        "chunks": [c.to_dict() for c in all_chunks],
+    }
+    cache_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
+    print(
+        f"[chunker] exam={exam.id}: pdfs={len(pdfs)} chunks={len(all_chunks)} "
+        f"-> {cache_path}"
+    )
+    return all_chunks

@@ -1,6 +1,6 @@
 # 北大在线考试自动答题
 
-用 Playwright 登录https://exam.pku.edu.cn/examinee/exams内的考试页、自动答题；目前支持 DeepSeek api 调用答题（有参考 PDF 时采用自适应chunk选择 RAG，无参考时直接作答）。
+用 Playwright 登录https://exam.pku.edu.cn/examinee/exams内的考试页、自动答题；目前支持 DeepSeek api 调用答题（有参考 PDF 时采用自适应chunk选择 RAG，无参考时直接作答）， rag技术支持下230页大参考文档+90题答题仅需 1毛1 token费用（相比全量投入上下文节约10倍左右）， 生成速度约2-3s/题， 可做95分。
 
 ## 快速开始（以https://exam.pku.edu.cn/examinee/exam/54  2026级研究生校规校纪考试为例）
 
@@ -77,9 +77,8 @@ exams/
 ```
 
 - 场次 id = 文件名（如 `exam54.json` → `exam54`）
-- `refs` 写 `exams/refs/` 下的文件名；`refs: []` 或不写则走 direct（不跑 RAG）
-- 多本 PDF 时当前仅索引第一本
-- 新增场次：新建 `exams/<id>.json`，把 PDF 放进 `exams/refs/`，在 `refs` 里写上文件名即可
+- `refs` 写 `exams/refs/` 下的文件名；可写多本，都会一并索引；`refs: []` 或不写则走 direct（不跑 RAG）
+- 新增场次：新建 `exams/<id>.json`，把 PDF 放进 `exams/refs/`，在 json文件的 `refs` 里写上文件名即可
 
 ## 注意事项
 
@@ -87,4 +86,4 @@ exams/
 - `.env` 里也可设 `AUTO_SUBMIT=true`（效果同 `--submit`），默认请保持 `false`。
 - `.env`、登录态、`exams/refs/` PDF、`exams/<id>/` 缓存默认不进 git；别人 pull 后需 `copy .env.example .env` 自行填写 API Key。
 
-在 Cursor 帮助下完成，耗时约 3h，非常好用。(｡･∀･)ﾉﾞ
+在 Cursor 帮助下完成，耗时约 4h，非常好用。(｡･∀･)ﾉﾞ
