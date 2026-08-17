@@ -82,7 +82,7 @@ class DeepSeekSession:
         profile = exam
         if profile is None:
             try:
-                profile = load_exam_profile(os.getenv("EXAM_ID") or None)
+                profile = load_exam_profile(None)
             except (FileNotFoundError, ValueError):
                 profile = None
 

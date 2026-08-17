@@ -22,28 +22,6 @@ def _ensure_playwright():
     return sync_playwright
 
 
-def _fill_iaaa_login(page: Any, username: str, password: str) -> None:
-    """在 IAAA 登录页填写账号密码并提交。"""
-    # 账号框：页面文案为 User ID / PKU Email / Cell Phone
-    user_box = page.get_by_placeholder("User ID / PKU Email / Cell Phone")
-    if user_box.count() == 0:
-        user_box = page.locator('input[type="text"]').first
-    user_box.fill(username)
-
-    pwd_box = page.get_by_placeholder("Password")
-    if pwd_box.count() == 0:
-        pwd_box = page.locator('input[type="password"]').first
-    pwd_box.fill(password)
-
-    # 按钮可能是 Login / 登录
-    login_btn = page.get_by_role("button", name="Login")
-    if login_btn.count() == 0:
-        login_btn = page.get_by_role("button", name="登录")
-    if login_btn.count() == 0:
-        login_btn = page.locator('input[type="submit"], button[type="submit"]').first
-    login_btn.click()
-
-
 def _is_login_url(url: str) -> bool:
     return "iaaa.pku.edu.cn" in url.lower() or "oauth.jsp" in url.lower()
 
@@ -54,7 +32,7 @@ def login_and_open_exam(
     reuse_storage: bool = True,
     timeout_ms: int = 60_000,
 ) -> tuple[Any, Any, Any]:
-    """打开浏览器，登录（或复用 storage_state），进入答题页。
+    """打开浏览器，复用 storage_state，进入答题页。
 
     返回 (playwright, browser, page)。调用方负责 browser.close() / playwright.stop()，
     或使用 login_session 上下文管理器。
@@ -84,41 +62,16 @@ def login_and_open_exam(
     page.goto(settings.exam_url, wait_until="domcontentloaded")
 
     if _is_login_url(page.url):
-        if not settings.username or not settings.password:
-            raise ExamAuthError(
-                "会话已失效且未配置账号密码。请执行 --manual-login，"
-                "或在 .env 填写测试账号后使用 --login-scrape。"
-            )
-        _fill_iaaa_login(page, settings.username, settings.password)
-        try:
-            page.wait_for_url(
-                lambda u: not _is_login_url(u),
-                timeout=timeout_ms,
-            )
-        except Exception as exc:
-            # 可能触发二次验证 / 验证码 / 密码错误
-            raise ExamAuthError(
-                "登录未完成：仍停留在 IAAA。请检查账号密码，"
-                "或关闭二次验证后重试；也可改用 --manual-login。"
-            ) from exc
-
-        # 登录成功后落到回调或考试页，再跳到目标考试 URL
-        if "exam.pku.edu.cn" not in page.url:
-            page.goto(settings.exam_url, wait_until="domcontentloaded")
-
-        context.storage_state(path=str(storage))
-    elif reuse_storage and storage.exists():
-        # 会话可能过期：仍在登录页以外但无考试内容时由上层判断
-        pass
-
-    if _is_login_url(page.url):
-        raise ExamAuthError("未能进入考试系统，当前仍是登录页。")
+        raise ExamAuthError(
+            "会话已失效或未登录。请先执行: python -m pku_exam.cli --manual-login"
+            + (f" --exam {settings.exam_id}" if settings.exam_id else "")
+        )
 
     # 确保在目标考试页
     if settings.exam_url.rstrip("/") not in page.url.rstrip("/"):
         page.goto(settings.exam_url, wait_until="domcontentloaded")
         if _is_login_url(page.url):
-            raise ExamAuthError("会话无效，访问考试页再次要求登录。")
+            raise ExamAuthError("会话无效，访问考试页再次要求登录。请重新 --manual-login。")
 
     return pw, browser, page
 

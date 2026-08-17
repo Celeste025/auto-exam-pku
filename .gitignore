@@ -8,9 +8,9 @@
 storage/
 *.storage.json
 
-# 大体量 PDF / RAG 缓存（exam.json 可提交）
-exams/**/refs/
-exams/**/rag/
+# 参考 PDF 与 RAG 缓存（exams/*.json 可提交）
+exams/refs/
+exams/*/
 /*.pdf
 
 # 运行时调试快照（运行时会再生成）

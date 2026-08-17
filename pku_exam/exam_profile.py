@@ -1,19 +1,20 @@
-"""多场次考试配置：自动扫描 exams/<id>/exam.json。
+"""多场次考试配置：自动扫描 exams/<id>.json。
 
 目录约定::
 
     exams/
-      exam54/
-        exam.json           # url / refs 等
-        refs/*.pdf          # 参考资料（可空）
-        rag/                # --build-index 生成
-          clean.txt
-          chunks.json
+      exam54.json           # 仅需 url / refs
+      exam57.json
+      refs/                 # 共享参考 PDF（用户放入）
+        2026eg.pdf
+      exam54/               # 自动生成：RAG 缓存（勿手改）
+        clean.txt
+        chunks.json
 
-场次 id = 目录名。默认场次由 --exam / EXAM_ID 指定；
+场次 id = JSON 文件名（不含扩展名）。默认场次由 --exam 指定；
 若都未指定且只发现一个场次，则自动选用该场次。
 
-`refs` 可为路径、路径列表或空列表；文件夹会收集其下全部 .pdf。
+`refs` 为 exams/refs/ 下的文件名（或相对该目录的路径）；空列表表示无参考（direct）。
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXAMS_DIR = REPO_ROOT / "exams"
+RESERVED_DIR_NAMES = frozenset({"refs"})
 
 
 @dataclass(frozen=True)
@@ -34,12 +36,15 @@ class ExamProfile:
     """一场考试的解析后配置（路径均为绝对路径）。"""
 
     id: str
-    name: str
     url: str
-    root_dir: Path
+    exams_dir: Path
+    config_path: Path
     ref_paths: tuple[Path, ...]
     rag_dir: Path = field(default_factory=Path)
-    description: str = ""
+
+    @property
+    def refs_dir(self) -> Path:
+        return self.exams_dir / "refs"
 
     @property
     def clean_text_path(self) -> Path:
@@ -66,9 +71,8 @@ class ExamProfile:
     def to_public_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
-            "name": self.name,
             "url": self.url,
-            "root_dir": str(self.root_dir),
+            "config": str(self.config_path),
             "refs": [str(p) for p in self.ref_paths],
             "has_refs": self.has_refs,
             "rag_dir": str(self.rag_dir),
@@ -85,23 +89,28 @@ def exams_root(exams_dir: str | Path | None = None) -> Path:
     return path
 
 
-def discover_exam_dirs(exams_dir: str | Path | None = None) -> dict[str, Path]:
-    """扫描 exams/*/exam.json，返回 {id: exam.json 路径}。"""
+def discover_exam_configs(exams_dir: str | Path | None = None) -> dict[str, Path]:
+    """扫描 exams/*.json，返回 {id: 配置文件路径}。"""
     root = exams_root(exams_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"找不到 exams 目录: {root}")
     found: dict[str, Path] = {}
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
+    for child in sorted(root.glob("*.json")):
+        if not child.is_file():
             continue
-        exam_json = child / "exam.json"
-        if exam_json.is_file():
-            found[child.name] = exam_json
+        eid = child.stem
+        if eid in RESERVED_DIR_NAMES:
+            continue
+        found[eid] = child
     return found
 
 
+# 兼容旧名
+discover_exam_dirs = discover_exam_configs
+
+
 def list_exam_ids(exams_dir: str | Path | None = None) -> list[str]:
-    return sorted(discover_exam_dirs(exams_dir).keys())
+    return sorted(discover_exam_configs(exams_dir).keys())
 
 
 def resolve_exam_id(
@@ -109,19 +118,19 @@ def resolve_exam_id(
     *,
     exams_dir: str | Path | None = None,
 ) -> str:
-    known = discover_exam_dirs(exams_dir)
+    known = discover_exam_configs(exams_dir)
     if not known:
         raise ValueError(
-            f"在 {exams_root(exams_dir)} 下未发现任何 exams/<id>/exam.json。\n"
-            "请新建场次目录并放入 exam.json。"
+            f"在 {exams_root(exams_dir)} 下未发现任何 exams/<id>.json。\n"
+            "请新建 exams/<id>.json，并把参考 PDF 放到 exams/refs/。"
         )
-    chosen = (exam_id or os.getenv("EXAM_ID", "")).strip()
+    chosen = (exam_id or "").strip()
     if not chosen:
         if len(known) == 1:
             return next(iter(known))
         known_s = ", ".join(known.keys())
         raise ValueError(
-            f"未指定 exam id：请传 --exam 或设置 EXAM_ID。可选: {known_s}"
+            f"未指定 exam id：请传 --exam。可选: {known_s}"
         )
     if chosen not in known:
         known_s = ", ".join(known.keys())
@@ -134,10 +143,11 @@ def load_exam_profile(
     *,
     exams_dir: str | Path | None = None,
 ) -> ExamProfile:
+    root = exams_root(exams_dir)
     eid = resolve_exam_id(exam_id, exams_dir=exams_dir)
-    exam_json = discover_exam_dirs(exams_dir)[eid]
-    data = json.loads(exam_json.read_text(encoding="utf-8"))
-    return _profile_from_dict(data, root_dir=exam_json.parent, exam_json=exam_json)
+    config_path = discover_exam_configs(exams_dir)[eid]
+    data = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    return _profile_from_dict(data, exam_id=eid, exams_dir=root, config_path=config_path)
 
 
 def _resolve_path(base: Path, raw: str | Path) -> Path:
@@ -147,29 +157,32 @@ def _resolve_path(base: Path, raw: str | Path) -> Path:
     return p
 
 
-def _expand_refs(root_dir: Path, refs_raw: Any) -> list[Path]:
-    """解析 refs。空列表 / 显式空 = 无参考资料（走模型直答）。"""
+def _expand_refs(refs_dir: Path, refs_raw: Any) -> list[Path]:
+    """解析 refs：相对路径均相对于 exams/refs/。"""
     if refs_raw is None:
-        default_dir = root_dir / "refs"
-        if default_dir.is_dir():
-            pdfs = sorted(default_dir.rglob("*.pdf"))
-            return [p.resolve() for p in pdfs]
+        # 未写 refs：不自动扫全目录，避免误绑；显式 [] 或省略都视为无参考
         return []
     if isinstance(refs_raw, (str, Path)):
         refs_list: list[Any] = [refs_raw]
     elif isinstance(refs_raw, list):
         refs_list = list(refs_raw)
     else:
-        raise ValueError(f"exam.json 的 refs 类型无效: {type(refs_raw)}")
+        raise ValueError(f"exam 配置的 refs 类型无效: {type(refs_raw)}")
 
     if not refs_list:
         return []
+
+    refs_dir.mkdir(parents=True, exist_ok=True)
 
     out: list[Path] = []
     for item in refs_list:
         if item is None or str(item).strip() == "":
             continue
-        path = _resolve_path(root_dir, item)
+        raw = str(item).strip().replace("\\", "/")
+        # 兼容旧写法 "refs/xxx.pdf"
+        if raw.lower().startswith("refs/"):
+            raw = raw[5:]
+        path = _resolve_path(refs_dir, raw)
         if path.is_dir():
             pdfs = sorted(path.rglob("*.pdf"))
             if not pdfs:
@@ -182,7 +195,9 @@ def _expand_refs(root_dir: Path, refs_raw: Any) -> list[Path]:
                 continue
             out.append(path)
         else:
-            raise FileNotFoundError(f"参考路径不存在: {path}")
+            raise FileNotFoundError(
+                f"参考文件不存在: {path}\n请将 PDF 放到 {refs_dir} 并在 json 的 refs 中写文件名。"
+            )
     seen: set[Path] = set()
     uniq: list[Path] = []
     for p in out:
@@ -196,25 +211,24 @@ def _expand_refs(root_dir: Path, refs_raw: Any) -> list[Path]:
 def _profile_from_dict(
     data: dict[str, Any],
     *,
-    root_dir: Path,
-    exam_json: Path | None,
+    exam_id: str,
+    exams_dir: Path,
+    config_path: Path | None,
 ) -> ExamProfile:
-    eid = str(data.get("id") or root_dir.name).strip()
-    name = str(data.get("name") or eid).strip()
+    eid = exam_id.strip()
     url = str(data.get("url") or data.get("exam_url") or "").strip()
     if not url:
-        raise ValueError(f"exam '{eid}' 缺少 url 字段（见 {exam_json or root_dir}）")
+        raise ValueError(f"exam '{eid}' 缺少 url 字段（见 {config_path or eid}）")
 
-    rag_raw = data.get("rag_dir") or "rag"
-    rag_dir = _resolve_path(root_dir, rag_raw)
-    refs = tuple(_expand_refs(root_dir, data.get("refs")))
+    exams_dir = exams_dir.resolve()
+    rag_dir = (exams_dir / eid).resolve()
+    refs = tuple(_expand_refs(exams_dir / "refs", data.get("refs")))
 
     return ExamProfile(
         id=eid,
-        name=name,
         url=url,
-        root_dir=root_dir.resolve(),
+        exams_dir=exams_dir,
+        config_path=(config_path or (exams_dir / f"{eid}.json")).resolve(),
         ref_paths=tuple(refs),
         rag_dir=rag_dir,
-        description=str(data.get("description") or ""),
     )

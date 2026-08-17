@@ -44,66 +44,32 @@ def _print_question(question) -> None:
     print(json.dumps(question.to_dict(), ensure_ascii=False, indent=2))
 
 
-def _load_session_settings(
-    *,
-    require_credentials: bool,
-    exam_id: str | None = None,
-) -> Settings:
+def _load_session_settings(*, exam_id: str | None = None) -> Settings:
     load_dotenv(".env")
-    storage = Path(os.getenv("STORAGE_STATE_PATH", "storage/pku_exam_state.json"))
-    if not require_credentials and storage.exists():
-        # 必须成功加载 exam，避免静默回退到错误场次
-        base = load_settings(require_credentials=False, exam_id=exam_id)
-        return Settings(
-            username=base.username,
-            password=base.password,
-            exam_url=base.exam_url,
-            storage_state_path=storage,
-            headless=os.getenv("HEADLESS", "false").strip().lower()
-            in {"1", "true", "yes", "y"},
-            exam_id=base.exam_id,
-            exam=base.exam,
+    return load_settings(exam_id=exam_id)
+
+
+def _scrape_with_session(*, exam_id: str | None = None) -> int:
+    try:
+        settings = _load_session_settings(exam_id=exam_id)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not settings.storage_state_path.exists():
+        print(
+            f"未找到会话文件 {settings.storage_state_path}。"
+            "请先：python -m pku_exam.cli --manual-login",
+            file=sys.stderr,
         )
-    return load_settings(require_credentials=require_credentials, exam_id=exam_id)
-
-
-def _scrape_with_session(
-    *,
-    reuse_storage: bool,
-    force_login: bool,
-    exam_id: str | None = None,
-) -> int:
-    if reuse_storage and not force_login:
-        if not Path(os.getenv("STORAGE_STATE_PATH", "storage/pku_exam_state.json")).exists():
-            load_dotenv(".env")
-        try:
-            settings = _load_session_settings(
-                require_credentials=False, exam_id=exam_id
-            )
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return 1
-        if not settings.storage_state_path.exists():
-            print(
-                f"未找到会话文件 {settings.storage_state_path}。"
-                "请先：python -m pku_exam.cli --manual-login",
-                file=sys.stderr,
-            )
-            return 1
-    else:
-        try:
-            settings = load_settings(require_credentials=True, exam_id=exam_id)
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return 1
+        return 1
 
     if settings.exam:
-        print(f"[exam] {settings.exam.id}: {settings.exam.name}")
+        print(f"[exam] {settings.exam.id}")
         print(f"[exam] url={settings.exam_url}")
 
     loader = ExamPageLoader()
     try:
-        with LoginSession(settings, reuse_storage=reuse_storage and not force_login) as session:
+        with LoginSession(settings, reuse_storage=True) as session:
             page = session.page
             print(f"已进入: {page.url}")
             print("等待 Vue 页面渲染题目 / 拦截 API…")
@@ -131,9 +97,7 @@ def _run_auto_answer(
 ) -> int:
     load_dotenv(".env")
     try:
-        settings = _load_session_settings(
-            require_credentials=False, exam_id=exam_id
-        )
+        settings = _load_session_settings(exam_id=exam_id)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -142,8 +106,6 @@ def _run_auto_answer(
         return 1
 
     settings = Settings(
-        username=settings.username,
-        password=settings.password,
         exam_url=settings.exam_url,
         storage_state_path=settings.storage_state_path,
         headless=False,
@@ -242,14 +204,12 @@ def _run_auto_answer(
 def _run_manual_login(*, exam_id: str | None = None) -> int:
     load_dotenv(".env")
     try:
-        settings = load_settings(require_credentials=False, exam_id=exam_id)
+        settings = load_settings(exam_id=exam_id)
     except ValueError as exc:
         # 无 exams 配置时仍允许手工登录
         exam_url = os.getenv("EXAM_URL", "https://exam.pku.edu.cn/examinee/exam/54/").strip()
         storage = Path(os.getenv("STORAGE_STATE_PATH", "storage/pku_exam_state.json"))
         settings = Settings(
-            username=os.getenv("PKU_USERNAME", "").strip() or "manual",
-            password=os.getenv("PKU_PASSWORD", "").strip() or "manual",
             exam_url=exam_url,
             storage_state_path=storage,
             headless=False,
@@ -259,8 +219,6 @@ def _run_manual_login(*, exam_id: str | None = None) -> int:
         print(f"[warn] exam 配置加载失败，使用 EXAM_URL={exam_url}: {exc}")
 
     settings = Settings(
-        username=settings.username or "manual",
-        password=settings.password or "manual",
         exam_url=settings.exam_url,
         storage_state_path=settings.storage_state_path,
         headless=False,
@@ -268,7 +226,7 @@ def _run_manual_login(*, exam_id: str | None = None) -> int:
         exam=settings.exam,
     )
     if settings.exam:
-        print(f"[exam] {settings.exam.id}: {settings.exam.name}")
+        print(f"[exam] {settings.exam.id}")
     try:
         path = manual_login_and_save(settings)
     except ExamAuthError as exc:
@@ -292,12 +250,12 @@ def _list_exams() -> int:
     for eid in ids:
         try:
             p = load_exam_profile(eid)
-            print(f"- {p.id}: {p.name}")
+            print(f"- {p.id}")
             print(f"  url: {p.url}")
             refs_disp = []
             for x in p.ref_paths:
                 try:
-                    refs_disp.append(str(x.relative_to(p.root_dir)))
+                    refs_disp.append(str(x.relative_to(p.refs_dir)))
                 except ValueError:
                     refs_disp.append(str(x))
             print(f"  refs: {refs_disp}")
@@ -308,7 +266,7 @@ def _list_exams() -> int:
 
 
 def _build_index(*, exam_id: str | None, force: bool = False) -> int:
-    """显式预处理参考 PDF → rag/clean.txt + rag/chunks.json。
+    """显式预处理参考 PDF → exams/<id>/{clean.txt,chunks.json}。
 
     默认：已有且不旧于 PDF 的缓存则跳过；--force-rebuild 才强制重建。
     """
@@ -320,7 +278,7 @@ def _build_index(*, exam_id: str | None, force: bool = False) -> int:
         print(f"加载 exam 失败: {exc}", file=sys.stderr)
         return 1
 
-    print(f"[index] exam={profile.id} name={profile.name}")
+    print(f"[index] exam={profile.id}")
     if not profile.has_refs:
         print("[index] 该场次 refs 为空，无需预处理（答题将走 direct 模式）")
         return 0
@@ -343,13 +301,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--exam",
         default=None,
-        help="场次 id（扫描 exams/<id>/exam.json）；也可用环境变量 EXAM_ID",
+        help="场次 id（扫描 exams/<id>.json）",
     )
     parser.add_argument("--list-exams", action="store_true", help="列出可用场次")
     parser.add_argument(
         "--build-index",
         action="store_true",
-        help="预处理本场次 refs PDF → rag/（已有有效缓存则跳过；默认不执行）",
+        help="预处理本场次 refs PDF → exams/<id>/（已有有效缓存则跳过；默认不执行）",
     )
     parser.add_argument(
         "--force-rebuild",
@@ -357,7 +315,6 @@ def main(argv: list[str] | None = None) -> int:
         help="与 --build-index 联用：忽略已有缓存，强制重新抽取与切块",
     )
     parser.add_argument("--manual-login", action="store_true", help="人工登录并保存会话")
-    parser.add_argument("--login-scrape", action="store_true", help="自动登录并抓题")
     parser.add_argument("--scrape", action="store_true", help="复用会话抓当前题")
     parser.add_argument(
         "--auto-answer",
@@ -380,7 +337,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="答完后自动点击「提交考试」并确认弹窗（默认不交卷）",
     )
-    parser.add_argument("--force-login", action="store_true")
     parser.add_argument("--html", type=Path)
     parser.add_argument("--url", type=str)
     parser.add_argument("--cookie", type=str, default="")
@@ -397,14 +353,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.manual_login:
         return _run_manual_login(exam_id=exam_id)
-    if args.login_scrape:
-        return _scrape_with_session(
-            reuse_storage=False, force_login=True, exam_id=exam_id
-        )
     if args.scrape:
-        return _scrape_with_session(
-            reuse_storage=True, force_login=args.force_login, exam_id=exam_id
-        )
+        return _scrape_with_session(exam_id=exam_id)
     if args.auto_answer:
         mq = None if args.max_questions <= 0 else args.max_questions
         env_submit = os.getenv("AUTO_SUBMIT", "").strip().lower() in {
