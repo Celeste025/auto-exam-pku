@@ -49,6 +49,9 @@ python -m pku_exam.cli --auto-answer --exam exam54 --strategy llm --max-question
 
 # 答完整卷但不交卷（默认）
 python -m pku_exam.cli --auto-answer --exam exam54 --strategy llm
+
+# 开启调试日志（题目/选项/作答/RAG → debug/<exam>_<时间戳>/）
+python -m pku_exam.cli --auto-answer --exam exam54 --strategy llm --debug
 ```
 
 
@@ -84,6 +87,7 @@ exams/
 
 - 有参考 PDF 但未预处理时，`--auto-answer` 会提示先执行 `--build-index`。
 - `.env` 里也可设 `AUTO_SUBMIT=true`（效果同 `--submit`），默认请保持 `false`。
-- `.env`、登录态、`exams/refs/` PDF、`exams/<id>/` 缓存默认不进 git；别人 pull 后需 `copy .env.example .env` 自行填写 API Key。
+- 加 `--debug` 或设 `DEBUG=true` 会把每题题目、选项、模型作答、RAG 命中条文写到 `debug/<exam>_<时间戳>/`（含 `answers.jsonl`、`console.log`）。
+- `.env`、登录态、`exams/refs/` PDF、`exams/<id>/` 缓存、`debug/` 默认不进 git；别人 pull 后需 `copy .env.example .env` 自行填写 API Key。
 
 在 Cursor 帮助下完成，耗时约 4h，非常好用。(｡･∀･)ﾉﾞ

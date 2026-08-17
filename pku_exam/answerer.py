@@ -17,6 +17,10 @@ class AnswerStrategy(ABC):
     def answer(self, question: ExamQuestion) -> list[str]:
         """返回选项 key 列表，例如 ['B'] 或 ['A', 'C']；填空题可返回 ['文本']。"""
 
+    def get_last_debug(self) -> dict | None:
+        """可选：最近一次作答的调试信息（RAG / LLM 原文等）。"""
+        return None
+
 
 class ManualAnswerStrategy(AnswerStrategy):
     """占位：只打印，不选题。"""
@@ -73,6 +77,9 @@ class DeepSeekLLMStrategy(AnswerStrategy):
         if not keys:
             print("[llm] 未能解析出选项，跳过本题")
         return keys
+
+    def get_last_debug(self) -> dict | None:
+        return getattr(self.session, "last_debug", None)
 
 
 STRATEGIES: dict[str, type[AnswerStrategy]] = {

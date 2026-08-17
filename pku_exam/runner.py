@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from .answerer import AnswerStrategy
+from .debug_log import DebugRun
 from .exam_actor import ExamActor
 from .models import ExamQuestion
 
@@ -20,6 +21,7 @@ def run_auto_answer_loop(
     step_delay_ms: int = 400,
     stop_on_error: bool = False,
     auto_submit: bool = False,
+    debug: DebugRun | None = None,
 ) -> list[dict[str, Any]]:
     """自动答题循环。
 
@@ -46,39 +48,61 @@ def run_auto_answer_loop(
         print(f"[auto] ({i}/{cap}) 进度 {progress.get('text')} | 策略={strategy.name}")
         print(question.pretty())
 
+        keys: list[str] = []
         try:
             keys = strategy.answer(question)
             if keys:
                 actor.select_keys(keys, question_type=question.question_type)
             else:
                 print("[auto] 策略未返回答案，跳过选题")
-        except Exception as exc:
-            print(f"[auto] 选题失败: {exc}")
-            results.append(
-                {
-                    "index": question.index,
-                    "keys": [],
-                    "ok": False,
-                    "error": str(exc),
-                    "stem": question.stem[:80],
-                }
-            )
-            if "has been closed" in str(exc).lower() or "Target page" in str(exc):
-                print("[auto] 浏览器已关闭，中止全卷")
-                break
-            if stop_on_error:
-                break
-            continue
-
-        results.append(
-            {
+            row = {
+                "seq": i,
                 "index": question.index,
                 "keys": keys,
                 "ok": True,
                 "stem": question.stem[:80],
                 "type": question.question_type,
             }
-        )
+            results.append(row)
+            if debug is not None:
+                debug.log_answer(
+                    {
+                        "seq": i,
+                        "progress": progress,
+                        "question": question.to_dict(),
+                        "keys": keys,
+                        "ok": True,
+                        "llm": strategy.get_last_debug(),
+                    }
+                )
+        except Exception as exc:
+            print(f"[auto] 选题失败: {exc}")
+            row = {
+                "index": question.index,
+                "keys": [],
+                "ok": False,
+                "error": str(exc),
+                "stem": question.stem[:80],
+            }
+            results.append(row)
+            if debug is not None:
+                debug.log_answer(
+                    {
+                        "seq": i,
+                        "progress": progress,
+                        "question": question.to_dict(),
+                        "keys": [],
+                        "ok": False,
+                        "error": str(exc),
+                        "llm": strategy.get_last_debug(),
+                    }
+                )
+            if "has been closed" in str(exc).lower() or "Target page" in str(exc):
+                print("[auto] 浏览器已关闭，中止全卷")
+                break
+            if stop_on_error:
+                break
+            continue
 
         # 最后一题：下一题按钮禁用
         if actor.is_last_question():

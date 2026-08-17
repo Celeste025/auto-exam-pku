@@ -94,8 +94,11 @@ def _run_auto_answer(
     max_questions: int | None,
     auto_submit: bool = False,
     exam_id: str | None = None,
+    debug: bool = False,
 ) -> int:
     load_dotenv(".env")
+    from .debug_log import DebugRun, debug_enabled
+
     try:
         settings = _load_session_settings(exam_id=exam_id)
     except ValueError as exc:
@@ -153,6 +156,18 @@ def _run_auto_answer(
         print(f"refs={list(settings.exam.ref_paths)}")
         print(f"rag={settings.exam.rag_dir}")
 
+    debug_run: DebugRun | None = None
+    if debug_enabled(cli_flag=debug):
+        model = ""
+        if hasattr(strategy, "session"):
+            model = getattr(strategy.session, "model", "") or ""
+        debug_run = DebugRun(
+            exam_id=settings.exam_id or exam_label,
+            strategy=strategy.name,
+            model=model,
+        )
+        debug_run.start()
+
     try:
         with LoginSession(settings, reuse_storage=True) as session:
             page = session.page
@@ -167,6 +182,7 @@ def _run_auto_answer(
                 strategy,
                 max_questions=max_questions,
                 auto_submit=auto_submit,
+                debug=debug_run,
             )
             print("=" * 60)
             print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -176,6 +192,14 @@ def _run_auto_answer(
                 f"自动答题结束：共 {n_q} 题"
                 + ("（已提交）。" if submitted else "（未交卷）。")
             )
+            if debug_run is not None:
+                debug_run.finish(
+                    summary={
+                        "answered": n_q,
+                        "submitted": submitted,
+                        "results": results,
+                    }
+                )
             if sys.stdin.isatty():
                 print("按回车关闭浏览器…")
                 try:
@@ -193,9 +217,13 @@ def _run_auto_answer(
             if n:
                 print(f"已清理会话文件中的 {n} 个作答锁")
     except ExamAuthError as exc:
+        if debug_run is not None:
+            debug_run.finish(summary={"error": str(exc)})
         print(f"认证失败: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
+        if debug_run is not None:
+            debug_run.finish(summary={"error": str(exc)})
         print(f"自动答题失败: {exc}", file=sys.stderr)
         return 1
     return 0
@@ -337,6 +365,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="答完后自动点击「提交考试」并确认弹窗（默认不交卷）",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="保存调试日志到 debug/<exam>_<时间戳>/（题目/选项/作答/RAG）；也可用 DEBUG=true",
+    )
     parser.add_argument("--html", type=Path)
     parser.add_argument("--url", type=str)
     parser.add_argument("--cookie", type=str, default="")
@@ -368,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
             max_questions=mq,
             auto_submit=bool(args.submit or env_submit),
             exam_id=exam_id,
+            debug=bool(args.debug),
         )
 
     if args.html:

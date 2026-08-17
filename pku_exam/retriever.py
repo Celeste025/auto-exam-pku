@@ -1,5 +1,7 @@
 """BM25 条款检索（结构切块 + 前言过滤 + 分数间隙自适应）。
 
+自适应按 Top1/Top2 比值多档取条，永不只取 1 条。
+重试路径支持多路查询 + RRF 融合（关闭 early-stop）。
 场次已用不同参考 PDF 区分本研，不再做 audience 筛选。
 """
 
@@ -7,9 +9,52 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from .chunker import RegulationChunk, build_or_load_chunks, build_or_load_chunks_for_exam
+
+# (Top1/Top2 下限, 取条数)：比值越高越少取；阈值偏松，减少轻易缩到 2/3。
+# 未命中任一档时取满 top_k；条数会被夹到 [2, top_k]。
+DEFAULT_GAP_LEVELS: tuple[tuple[float, int], ...] = (
+    (1.55, 2),
+    (1.35, 3),
+    (1.22, 4),
+)
+
+_STOPWORDS = frozenset(
+    {
+        "的",
+        "了",
+        "是",
+        "在",
+        "和",
+        "与",
+        "或",
+        "及",
+        "等",
+        "下列",
+        "根据",
+        "关于",
+        "正确",
+        "错误",
+        "属于",
+        "以下",
+        "哪项",
+        "哪些",
+        "什么",
+        "如何",
+        "可以",
+        "应当",
+        "应该",
+        "是否",
+        "一个",
+        "一种",
+        "学生",
+        "学校",
+        "本题",
+        "选项",
+    }
+)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -34,6 +79,20 @@ def _tokenize(text: str) -> list[str]:
 
 def _is_preamble(chunk: RegulationChunk) -> bool:
     return chunk.article in {"前言", "前言/目录"} or chunk.article.startswith("前言")
+
+
+def _keyword_subquery(query: str, *, max_terms: int = 40) -> str:
+    """题干关键词子查询（通用分词，不维护易混词表）。"""
+    seen: set[str] = set()
+    keep: list[str] = []
+    for t in _tokenize(query):
+        if len(t) < 2 or t in _STOPWORDS or t in seen:
+            continue
+        seen.add(t)
+        keep.append(t)
+        if len(keep) >= max_terms:
+            break
+    return " ".join(keep)
 
 
 @dataclass
@@ -87,15 +146,7 @@ class RegulationRetriever:
         print(f"[rag] chunks_cache={exam.chunks_path}")
         return cls(chunks, exclude_preamble=True)
 
-    def search(
-        self,
-        query: str,
-        *,
-        top_k: int = 4,
-        adaptive: bool = True,
-        gap_take1: float = 1.35,
-        gap_take2: float = 1.15,
-    ) -> list[RetrievedChunk]:
+    def _bm25_rank(self, query: str) -> list[RetrievedChunk]:
         tokens = _tokenize(query)
         if not tokens or self._bm25 is None or not self.chunks:
             return []
@@ -143,22 +194,99 @@ class RegulationRetriever:
                 continue
             ranked.append(RetrievedChunk(chunk=ch, score=float(sc)))
         ranked.sort(key=lambda x: x.score, reverse=True)
-        hits = ranked[: max(top_k, 3)]
+        return ranked
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 4,
+        adaptive: bool = True,
+        gap_levels: Sequence[tuple[float, int]] | None = None,
+    ) -> list[RetrievedChunk]:
+        """检索条款。
+
+        adaptive（永不只取 1 条）按 Top1/Top2 从高到低匹配 gap_levels：
+        默认 1.55→2 / 1.35→3 / 1.22→4，否则取满 top_k。阈值越大越难 early-stop。
+        """
+        ranked = self._bm25_rank(query)
+        if not ranked:
+            return []
+
+        levels = list(gap_levels) if gap_levels is not None else list(DEFAULT_GAP_LEVELS)
+        levels = sorted(
+            ((float(g), max(2, min(int(k), top_k))) for g, k in levels),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        hits = ranked[:top_k]
 
         if adaptive and len(hits) >= 2:
             s0, s1 = hits[0].score, hits[1].score
             ratio = s0 / s1 if s1 > 1e-6 else 99.0
-            if ratio >= gap_take1:
-                chosen = hits[:1]
-                print(f"[rag] 自适应: Top1/Top2={ratio:.2f} >= {gap_take1}，只取 1 条")
-            elif ratio >= gap_take2:
-                chosen = hits[:2]
-                print(f"[rag] 自适应: Top1/Top2={ratio:.2f} >= {gap_take2}，取 2 条")
+            take = top_k
+            matched_gap: float | None = None
+            for gap, k in levels:
+                if ratio >= gap:
+                    take = k
+                    matched_gap = gap
+                    break
+            chosen = hits[:take]
+            if matched_gap is not None:
+                print(
+                    f"[rag] 自适应: Top1/Top2={ratio:.2f} >= {matched_gap}，取 {len(chosen)} 条"
+                )
             else:
-                chosen = hits[:top_k]
                 print(f"[rag] 自适应: Top1/Top2={ratio:.2f}，取 Top-{len(chosen)}")
             return chosen
         return hits[:top_k]
+
+    def search_rrf(
+        self,
+        query: str,
+        *,
+        top_k: int = 8,
+        rrf_k: int = 60,
+        pool: int | None = None,
+    ) -> list[RetrievedChunk]:
+        """多路召回 + RRF 融合，不做 early-stop（用于缺信息重试）。
+
+        路径：完整题干 BM25 + 关键词子查询 BM25。
+        """
+        sub = _keyword_subquery(query)
+        queries = [query]
+        if sub and sub.strip() != query.strip():
+            queries.append(sub)
+            print(f"[rag] RRF 关键词路: {sub[:120]}{'…' if len(sub) > 120 else ''}")
+        else:
+            print("[rag] RRF: 仅题干一路（关键词路与题干等价，跳过）")
+
+        cand_n = pool if pool is not None else max(top_k * 4, 24)
+        rrf_scores: dict[str, float] = {}
+        best_bm25: dict[str, float] = {}
+        chunk_by_id: dict[str, RegulationChunk] = {}
+
+        for q in queries:
+            ranked = self._bm25_rank(q)
+            for rank, hit in enumerate(ranked[:cand_n]):
+                cid = hit.chunk.chunk_id
+                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (rrf_k + rank + 1)
+                chunk_by_id[cid] = hit.chunk
+                prev = best_bm25.get(cid, 0.0)
+                if hit.score > prev:
+                    best_bm25[cid] = hit.score
+
+        merged = [
+            RetrievedChunk(chunk=chunk_by_id[cid], score=score)
+            for cid, score in rrf_scores.items()
+        ]
+        merged.sort(
+            key=lambda h: (h.score, best_bm25.get(h.chunk.chunk_id, 0.0)),
+            reverse=True,
+        )
+        chosen = merged[:top_k]
+        print(f"[rag] RRF 融合: paths={len(queries)} → Top-{len(chosen)}（无 early-stop）")
+        return chosen
 
     def format_context(self, hits: Iterable[RetrievedChunk]) -> str:
         blocks = []
