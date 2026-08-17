@@ -1,4 +1,4 @@
-"""按校规结构切块：法规文件 + 第X条（非固定字数）。"""
+"""按校规结构切块：法规文件 + 第X条；无条款文档按编号/长度切前言块。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,27 @@ Audience = Literal["undergrad", "graduate", "general"]
 
 ARTICLE_SPLIT = re.compile(r"(?=第[一二三四五六七八九十百千零〇两\d]+条\s)")
 ARTICLE_HEAD = re.compile(r"^(第[一二三四五六七八九十百千零〇两\d]+条)")
+
+# 无「第X条」文档 / 条前序言：优先按「一、二、三」级标题切
+MAJOR_SECTION_SPLIT = re.compile(
+    r"(?m)(?=^(?:"
+    r"[一二三四五六七八九十百]+[、．.]|"
+    r"第[一二三四五六七八九十百零〇两\d]+[章节编]"
+    r"))"
+)
+MAJOR_SECTION_HEAD = re.compile(
+    r"^(?:"
+    r"([一二三四五六七八九十百]+[、．.])|"
+    r"(第[一二三四五六七八九十百零〇两\d]+[章节编])"
+    r")"
+)
+# 节内过长时再按「1．2．」切开
+MINOR_SECTION_SPLIT = re.compile(r"(?m)(?=^\d+\s*[．.、]\s*)")
+MINOR_SECTION_HEAD = re.compile(r"^(\d+)\s*[．.、]\s*")
+
+PREAMBLE_TARGET = 700
+PREAMBLE_MAX = 900
+PREAMBLE_MIN = 20
 
 # 研究生手册为主 + 共用规章；长标题优先匹配，避免短标题误伤
 KNOWN_DOC_TITLES: list[str] = [
@@ -157,6 +178,131 @@ def _find_doc_spans(full_text: str) -> list[tuple[str, int, int]]:
     return result
 
 
+def _pack_by_length(
+    text: str, *, target: int = PREAMBLE_TARGET, max_len: int = PREAMBLE_MAX
+) -> list[str]:
+    """按行打包成长度适中的块（无编号时的退路）。"""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return []
+    blocks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for ln in lines:
+        add = len(ln) + (1 if buf else 0)
+        if buf and size + add > max_len:
+            blocks.append("\n".join(buf))
+            buf, size = [ln], len(ln)
+            continue
+        buf.append(ln)
+        size += add
+        if size >= target:
+            blocks.append("\n".join(buf))
+            buf, size = [], 0
+    if buf:
+        blocks.append("\n".join(buf))
+    return blocks
+
+
+def _merge_short_pieces(
+    pieces: list[tuple[str, str]], *, min_len: int = PREAMBLE_MIN
+) -> list[tuple[str, str]]:
+    """过短片段并入上一块，避免编号标题/短句被丢掉。"""
+    if not pieces:
+        return []
+    out: list[tuple[str, str]] = []
+    for article, text in pieces:
+        text = text.strip()
+        if not text:
+            continue
+        if out and len(text) < min_len:
+            prev_a, prev_t = out[-1]
+            out[-1] = (prev_a, prev_t + "\n" + text)
+        else:
+            out.append((article, text))
+    return [(a, t) for a, t in out if len(t) >= min_len]
+
+
+def _split_preamble_pieces(text: str) -> list[tuple[str, str]]:
+    """把前言/无条款正文切成 (article_label, text) 列表。"""
+    text = text.strip()
+    if not text:
+        return []
+
+    majors = [p.strip() for p in MAJOR_SECTION_SPLIT.split(text) if p.strip()]
+    if len(majors) <= 1:
+        minors = [p.strip() for p in MINOR_SECTION_SPLIT.split(text) if p.strip()]
+        if len(minors) > 1:
+            raw: list[tuple[str, str]] = []
+            for j, minor in enumerate(minors):
+                mm = MINOR_SECTION_HEAD.match(minor)
+                if mm:
+                    tag = f"前言·{mm.group(1)}"
+                else:
+                    tag = f"前言·段{j + 1}"
+                if len(minor) <= PREAMBLE_MAX:
+                    raw.append((tag, minor))
+                else:
+                    for k, piece in enumerate(_pack_by_length(minor), 1):
+                        raw.append((tag if k == 1 else f"{tag}.{k}", piece))
+            return _merge_short_pieces(raw)
+        packed = _pack_by_length(text)
+        return _merge_short_pieces(
+            [(f"前言·段{i}", piece) for i, piece in enumerate(packed, 1)]
+        )
+
+    raw: list[tuple[str, str]] = []
+    for i, part in enumerate(majors):
+        m = MAJOR_SECTION_HEAD.match(part)
+        if m:
+            label = next(g for g in m.groups() if g).strip().rstrip("、．.")
+            article = f"前言·{label}"
+        else:
+            article = f"前言·段{i + 1}"
+
+        if len(part) <= PREAMBLE_MAX:
+            raw.append((article, part))
+            continue
+
+        minors = [p.strip() for p in MINOR_SECTION_SPLIT.split(part) if p.strip()]
+        if len(minors) > 1:
+            for j, minor in enumerate(minors):
+                mm = MINOR_SECTION_HEAD.match(minor)
+                if mm:
+                    tag = f"{article}·{mm.group(1)}"
+                elif j == 0:
+                    tag = article
+                else:
+                    tag = f"{article}·段{j}"
+                if len(minor) <= PREAMBLE_MAX:
+                    raw.append((tag, minor))
+                else:
+                    for k, piece in enumerate(_pack_by_length(minor), 1):
+                        raw.append((tag if k == 1 else f"{tag}.{k}", piece))
+        else:
+            for k, piece in enumerate(_pack_by_length(part), 1):
+                raw.append((article if k == 1 else f"{article}.{k}", piece))
+
+    return _merge_short_pieces(raw)
+
+
+def _emit_preamble_chunks(
+    doc_title: str, audience: Audience, text: str
+) -> list[RegulationChunk]:
+    chunks: list[RegulationChunk] = []
+    for article, piece in _split_preamble_pieces(text):
+        chunks.append(
+            RegulationChunk(
+                chunk_id=f"{doc_title}#{article}",
+                doc_title=doc_title,
+                audience=audience,
+                article=article,
+                text=piece,
+            )
+        )
+    return chunks
+
+
 def split_regulation_chunks(full_text: str) -> list[RegulationChunk]:
     docs = _find_doc_spans(full_text)
     chunks: list[RegulationChunk] = []
@@ -180,6 +326,14 @@ def split_regulation_chunks(full_text: str) -> list[RegulationChunk]:
             else:
                 article_parts[-1] = article_parts[-1] + "\n" + p
 
+        # 条前序言：切成若干前言块并入库（不再丢弃）
+        if preamble_bits:
+            chunks.extend(
+                _emit_preamble_chunks(
+                    doc_title, audience, "\n".join(preamble_bits)
+                )
+            )
+
         for i, art in enumerate(article_parts):
             m = ARTICLE_HEAD.match(art)
             article = m.group(1) if m else f"段{i+1}"
@@ -198,18 +352,12 @@ def split_regulation_chunks(full_text: str) -> list[RegulationChunk]:
                 )
             )
 
+        # 无「第X条」的整篇文档：按编号/长度切前言块
         if not article_parts and preamble_bits:
-            # 无「第X条」的文件仍保留前言块，但检索侧会降权/过滤
-            text = "\n".join(preamble_bits)[:6000]
-            chunks.append(
-                RegulationChunk(
-                    chunk_id=f"{doc_title}#前言",
-                    doc_title=doc_title,
-                    audience=audience,
-                    article="前言",
-                    text=text,
-                )
-            )
+            # 上面已用 preamble_bits emit 过；避免重复
+            pass
+        elif not article_parts:
+            chunks.extend(_emit_preamble_chunks(doc_title, audience, body))
     return chunks
 
 

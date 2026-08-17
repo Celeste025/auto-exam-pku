@@ -1,7 +1,8 @@
-"""BM25 条款检索（结构切块 + 前言过滤 + 分数间隙自适应）。
+"""BM25 条款检索（结构切块 + 分数间隙自适应）。
 
 自适应按 Top1/Top2 比值多档取条，永不只取 1 条。
 重试路径支持多路查询 + RRF 融合（关闭 early-stop）。
+前言块已按小节切分，参与检索（不再整块过滤）。
 场次已用不同参考 PDF 区分本研，不再做 audience 筛选。
 """
 
@@ -106,8 +107,8 @@ class RegulationRetriever:
         self,
         chunks: list[RegulationChunk],
         *,
-        exclude_preamble: bool = True,
-        preamble_penalty: float = 12.0,
+        exclude_preamble: bool = False,
+        preamble_penalty: float = 0.0,
     ) -> None:
         if exclude_preamble:
             self.chunks = [c for c in chunks if not _is_preamble(c)]
@@ -116,6 +117,9 @@ class RegulationRetriever:
                 print(f"[rag] 已过滤前言块: {skipped}，参与检索: {len(self.chunks)}")
         else:
             self.chunks = chunks
+            n_pre = sum(1 for c in chunks if _is_preamble(c))
+            if n_pre:
+                print(f"[rag] 前言块参与检索: {n_pre}，总块数: {len(self.chunks)}")
         self.preamble_penalty = preamble_penalty
         self._corpus_tokens = [
             _tokenize(c.doc_title + " " + c.article + " " + c.text) for c in self.chunks
@@ -133,7 +137,7 @@ class RegulationRetriever:
     def from_pdf(cls, pdf_path: str) -> RegulationRetriever:
         chunks = build_or_load_chunks(pdf_path, force_rebuild=False)
         print(f"[rag] 条款块数量(含前言): {len(chunks)}")
-        return cls(chunks, exclude_preamble=True)
+        return cls(chunks, exclude_preamble=False)
 
     @classmethod
     def from_exam(cls, exam) -> RegulationRetriever:
@@ -144,7 +148,7 @@ class RegulationRetriever:
         print(f"[rag] exam={exam.id} 条款块数量(含前言): {len(chunks)}")
         print(f"[rag] refs={[str(p) for p in exam.ref_paths]}")
         print(f"[rag] chunks_cache={exam.chunks_path}")
-        return cls(chunks, exclude_preamble=True)
+        return cls(chunks, exclude_preamble=False)
 
     def _bm25_rank(self, query: str) -> list[RetrievedChunk]:
         tokens = _tokenize(query)
@@ -179,7 +183,7 @@ class RegulationRetriever:
             for w in boost_terms:
                 if w in ch.text:
                     bonus += 1.5
-            if _is_preamble(ch):
+            if _is_preamble(ch) and self.preamble_penalty:
                 bonus -= self.preamble_penalty
             if re.match(r"^第.+条$", ch.article):
                 bonus += 0.8
@@ -189,10 +193,7 @@ class RegulationRetriever:
         for i, sc in enumerate(scores):
             if sc <= 0:
                 continue
-            ch = self.chunks[i]
-            if _is_preamble(ch):
-                continue
-            ranked.append(RetrievedChunk(chunk=ch, score=float(sc)))
+            ranked.append(RetrievedChunk(chunk=self.chunks[i], score=float(sc)))
         ranked.sort(key=lambda x: x.score, reverse=True)
         return ranked
 
