@@ -1,6 +1,6 @@
 # 北大在线考试自动答题
 
-用 Playwright 登录https://exam.pku.edu.cn/examinee/exams内的考试页、自动答题；目前支持 DeepSeek api 调用答题（有参考 PDF 时采用自适应chunk选择 RAG，无参考时直接作答）， rag技术支持下230页大参考文档+90题答题仅需 1毛1 token费用（相比全量投入上下文节约10倍左右）， 生成速度约2-3s/题， 可做95分。
+用 Playwright 登录https://exam.pku.edu.cn/examinee/exams内的考试页、自动答题；目前支持 DeepSeek api 调用答题（有参考 PDF 时采用自适应chunk选择 RAG，无参考时直接作答）， rag技术支持下230页大参考文档+90题答题仅需 2 token费用（相比全量投入上下文节约8倍左右）， 生成速度约2-3s/题， 可做98-100分。
 
 ## 快速开始（以https://exam.pku.edu.cn/examinee/exam/54  2026级研究生校规校纪考试为例）
 
@@ -89,5 +89,19 @@ exams/
 - `.env` 里也可设 `AUTO_SUBMIT=true`（效果同 `--submit`），默认请保持 `false`。
 - 加 `--debug` 或设 `DEBUG=true` 会把每题题目、选项、模型作答、RAG 命中条文写到 `debug/<exam>_<时间戳>/`（含 `answers.jsonl`、`console.log`）。
 - `.env`、登录态、`exams/refs/` PDF、`exams/<id>/` 缓存、`debug/` 默认不进 git；别人 pull 后需 `copy .env.example .env` 自行填写 API Key。
+
+## 主要技术
+
+| 环节 | 做法 |
+|------|------|
+| 浏览器自动化 | Playwright + 本地 `storage_state` 复用登录态（`--manual-login` 一次即可） |
+| PDF 预处理 | 抽取正文 → 按规章标题切文档 → 按「第×条」切块；无条款文档按「一、二、三 / 1．2．」或长度切前言块 |
+| 检索 | BM25（jieba 分词）；默认 Top-K=4；多 PDF 合并进同一索引 |
+| 自适应取条 | 看 Top1/Top2 分差多档取 2 / 3 / 4 条，**永不只取 1 条**（省 token，又避免半截条文） |
+| 缺信息重试 | 模型可返回 `need_more`；仅扩检一次：更大 Top-K + 题干/关键词多路 **RRF**、关闭 early-stop |
+| 作答 | DeepSeek JSON 模式；多选逐项判断；无 `refs` 的场次走 direct（不跑 RAG） |
+| 调试 | `--debug` / `DEBUG=true` → `debug/<exam>_<时间戳>/`（`answers.jsonl`、`console.log`、`run.json`） |
+
+相关环境变量见 `.env.example`（如 `DEEPSEEK_RAG_TOP_K`、`DEEPSEEK_RAG_RETRY`、`DEEPSEEK_RAG_RETRY_TOP_K`）。
 
 在 Cursor 帮助下完成，耗时约 4h，非常好用。(｡･∀･)ﾉﾞ
